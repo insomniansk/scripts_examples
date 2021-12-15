@@ -1,0 +1,115 @@
+stages:
+  - prepare
+  - build
+  - deploy
+variables:
+  VERSION: 0.3-$CI_COMMIT_SHORT_SHA
+
+prepare_dev:
+  stage: prepare
+  #tags:
+  # - django-ci
+  script:
+  - bash config_dev.sh
+  - python3 manage.py makemigrations
+  - python3 manage.py migrate
+  - python3 manage.py collectstatic --noinput
+  - tar -czvf static.tar.gz static
+  artifacts:
+    paths:
+      - static.tar.gz
+    expire_in: 1 week
+  only:
+    - develop
+
+prepare_prod:
+  stage: prepare
+  #tags:
+  # - django-ci
+  script:
+  - bash config_prod.sh
+  - python3 manage.py makemigrations
+  - python3 manage.py migrate
+  - python3 manage.py collectstatic --noinput
+  - tar -czvf static.tar.gz static
+  artifacts:
+    paths:
+      - static.tar.gz
+    expire_in: 1 week
+  only:
+    - main
+
+
+build_dev:
+  stage: build
+  # test dependencies directive
+  # test comment
+  dependencies:
+    - prepare_dev
+  #when: manual
+  script:
+    - bash config_dev.sh
+    - docker login -u $CI_REGISTRY_USER -p $CI_REGISTRY_PASSWORD $CI_REGISTRY
+    - docker build --no-cache -t ${CI_REGISTRY}/registration20/registration-2.0/regapp_dev:${VERSION} .
+    - docker push ${CI_REGISTRY}/registration20/registration-2.0/regapp_dev:${VERSION}
+  only:
+    - develop
+
+build_prod:
+  stage: build
+  # test dependencies directive
+  dependencies:
+    - prepare_prod
+  #when: manual
+  script:
+    - bash config_prod.sh
+    - docker login -u $CI_REGISTRY_USER -p $CI_REGISTRY_PASSWORD $CI_REGISTRY
+    - docker build --no-cache -t ${CI_REGISTRY}/registration20/registration-2.0/regapp_prod:${VERSION} .
+    - docker push ${CI_REGISTRY}/registration20/registration-2.0/regapp_prod:${VERSION}
+  only:
+    - main
+
+deploy_dev:
+  stage: deploy
+  script:
+    - chmod og= $DEV_SSH_KEY
+    # extracting static files to nginx host
+    - ssh -i $DEV_SSH_KEY -o StrictHostKeyChecking=no $DEV_USER@$DEV_HOST "mkdir /home/test.${DOMAIN_NAME}/www/static/$VERSION || true"
+    - scp -i $DEV_SSH_KEY -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null  static.tar.gz $DEV_USER@$DEV_HOST:/home/test.${DOMAIN_NAME}/www/static/$VERSION
+    - ssh -i $DEV_SSH_KEY -o StrictHostKeyChecking=no $DEV_USER@$DEV_HOST "cd /home/test.${DOMAIN_NAME}/www/static/$VERSION/ && tar xzf static.tar.gz"
+    - ssh -i $DEV_SSH_KEY -o StrictHostKeyChecking=no $DEV_USER@$DEV_HOST "rm /home/test.${DOMAIN_NAME}/www/static/$VERSION/static.tar.gz"
+    # deploying docker image to docker host
+    - ssh -i $DEV_SSH_KEY -o StrictHostKeyChecking=no $DEV_USER@$DEV_HOST "docker login -u $CI_REGISTRY_USER -p $CI_REGISTRY_PASSWORD $CI_REGISTRY"
+    - ssh -i $DEV_SSH_KEY -o StrictHostKeyChecking=no $DEV_USER@$DEV_HOST "docker pull ${CI_REGISTRY}/registration20/registration-2.0/regapp_dev:${VERSION}"
+    - ssh -i $DEV_SSH_KEY -o StrictHostKeyChecking=no $DEV_USER@$DEV_HOST "docker container rm -f regapp_dev || true"
+    - ssh -i $DEV_SSH_KEY -o StrictHostKeyChecking=no $DEV_USER@$DEV_HOST "docker run -d  -p 8000:8000 --name regapp_dev ${CI_REGISTRY}/registration20/registration-2.0/regapp_dev:${VERSION}"
+    # activating new version of static files
+    - ssh -i $DEV_SSH_KEY -o StrictHostKeyChecking=no $DEV_USER@$DEV_HOST "touch /home/test.${DOMAIN_NAME}/www/static/active"
+    - ssh -i $DEV_SSH_KEY -o StrictHostKeyChecking=no $DEV_USER@$DEV_HOST "rm /home/test.${DOMAIN_NAME}/www/static/active && ln -s /home/test.${DOMAIN_NAME}/www/static/$VERSION/static /home/test.${DOMAIN_NAME}/www/static/active"
+    # deleting old versions of static
+    - ssh -i $DEV_SSH_KEY -o StrictHostKeyChecking=no $DEV_USER@$DEV_HOST "cd /home/test.${DOMAIN_NAME}/www/static && ls | grep -v $VERSION | grep -v active | xargs rm -rfv"
+  only:
+    - develop
+
+
+deploy_prod:
+  stage: deploy
+  script:
+    - chmod og= $PROD_SSH_KEY
+    # extracting static files to nginx host
+    - ssh -i $PROD_SSH_KEY -o StrictHostKeyChecking=no $PROD_USER@$PROD_HOST "mkdir /home/${DOMAIN_NAME}/www/static/$VERSION || true"
+    - scp -i $PROD_SSH_KEY -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null  static.tar.gz $PROD_USER@$PROD_HOST:/home/${DOMAIN_NAME}/www/static/$VERSION
+    - ssh -i $PROD_SSH_KEY -o StrictHostKeyChecking=no $PROD_USER@$PROD_HOST "cd /home/${DOMAIN_NAME}/www/static/$VERSION/ && tar xzf static.tar.gz"
+    - ssh -i $PROD_SSH_KEY -o StrictHostKeyChecking=no $PROD_USER@$PROD_HOST "rm /home/${DOMAIN_NAME}/www/static/$VERSION/static.tar.gz"
+    # deploying docker image to docker host
+    - ssh -i $PROD_SSH_KEY -o StrictHostKeyChecking=no $PROD_USER@$PROD_HOST "docker login -u $CI_REGISTRY_USER -p $CI_REGISTRY_PASSWORD $CI_REGISTRY"
+    - ssh -i $PROD_SSH_KEY -o StrictHostKeyChecking=no $PROD_USER@$PROD_HOST "docker pull ${CI_REGISTRY}/registration20/registration-2.0/regapp_prod:${VERSION}"
+    - ssh -i $PROD_SSH_KEY -o StrictHostKeyChecking=no $PROD_USER@$PROD_HOST "docker container rm -f regapp_prod || true"
+    - ssh -i $PROD_SSH_KEY -o StrictHostKeyChecking=no $PROD_USER@$PROD_HOST "docker run -d  -p 8000:8000 --restart unless-stopped --name regapp_prod ${CI_REGISTRY}/registration20/registration-2.0/regapp_prod:${VERSION}"
+    # activating new version of static files
+    - ssh -i $PROD_SSH_KEY -o StrictHostKeyChecking=no $PROD_USER@$PROD_HOST "touch /home/${DOMAIN_NAME}/www/static/active"
+    - ssh -i $PROD_SSH_KEY -o StrictHostKeyChecking=no $PROD_USER@$PROD_HOST "rm /home/${DOMAIN_NAME}/www/static/active && ln -s /home/${DOMAIN_NAME}/www/static/$VERSION/static /home/${DOMAIN_NAME}/www/static/active"
+    # deleting old versions of static
+    - ssh -i $PROD_SSH_KEY -o StrictHostKeyChecking=no $PROD_USER@$PROD_HOST "cd /home/${DOMAIN_NAME}/www/static && ls | grep -v $VERSION | grep -v active | xargs rm -rfv"
+  only:
+    - main
